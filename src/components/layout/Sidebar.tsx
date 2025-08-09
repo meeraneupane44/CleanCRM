@@ -1,11 +1,13 @@
 import React, { useState } from "react";
-import { useLocation, Link } from "react-router-dom";
+import {useNavigate, useLocation, Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import SignupForm from "@/components/SignupForm";
+
 import {
   CalendarIcon,
   HomeIcon,
@@ -15,6 +17,7 @@ import {
   LogOutIcon,
   MenuIcon,
 } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 interface SidebarProps {
   className?: string;
@@ -25,7 +28,11 @@ interface SidebarProps {
 const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const location = useLocation();
-
+  const navigate = useNavigate();
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate("/login");
+  };
   const navItems = [
     { icon: <HomeIcon size={20} />, label: "Dashboard", href: "/" },
     { icon: <CalendarIcon size={20} />, label: "Scheduler", href: "/scheduler" },
@@ -93,7 +100,7 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
               <p className="text-xs text-muted-foreground">admin@dfw20cleaners.com</p>
             </div>
           </div>
-          <Button variant="ghost" size="icon">
+          <Button variant="ghost" size="icon" onClick={handleLogout}>
             <LogOutIcon size={18} />
           </Button>
         </div>

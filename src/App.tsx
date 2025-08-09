@@ -8,6 +8,8 @@ import Clients from "./components/clients.tsx";
 //import Settings from "./components/settings";
 import Sidebar from "./components/layout/Sidebar";
 import Cleaners from "./components/cleaners";
+import SignupForm from "@/components/SignupForm";
+import SignInForm from "@/components/SignInForm";
 
 const App = () => {
   return (
@@ -20,6 +22,8 @@ const App = () => {
             <Route path="/scheduler" element={<Scheduler />} />
             <Route path="/cleaners" element={<Cleaners />} />  
             <Route path="/clients" element={<Clients />} />
+            <Route path="/signup" element={<SignupForm />} />
+            <Route path="/login" element={<SignInForm />} />
             {/* <Route path="/settings" element={<Settings />} />  */}
           </Routes>
         </div>
