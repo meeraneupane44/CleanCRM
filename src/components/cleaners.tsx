@@ -26,15 +26,17 @@ import {
   Mail,
 } from "lucide-react";
 
+// ✅ local date helpers (no UTC shift for DATE columns)
+import { ymdLocalFromDate, formatYMDLocal } from "@/lib/dates";
+
 /**
  * This page is aligned to your posted schema:
  * public.jobs(id, client_id, cleaner_id, status, date, start_time, end_time, address, notes, created_by, created_at, check_in_at, check_out_at)
  * public.users(id, email, name, phone, role, created_at, avatar_url)
  *
- * RPCs expected (security definer):
+ * RPC expected (security definer):
  * - admin_create_job(p jsonb) -> uuid
- *   expects keys: { address, date, start_time?, end_time?, notes?, client_id?, status? }
- * - admin_assign_cleaner(job_id uuid, cleaner_id uuid)
+ *   expects keys: { address, date, start_time?, end_time?, notes?, client_id?, cleaner_id, status? }
  */
 
 // -------------------- Types --------------------
@@ -59,7 +61,7 @@ interface JobRow {
 
 interface CleanerProfile {
   id: string;
-  name: string;
+  name: string | null;
   phone: string | null;
   email: string | null;
   avatar_url: string | null;
@@ -70,7 +72,7 @@ interface CleanerProfile {
 type Availability = "Available" | "Busy" | "Off Duty";
 
 // -------------------- Utils --------------------
-function initials(name?: string) {
+function initials(name?: string | null) {
   if (!name) return "?";
   const parts = name.trim().split(" ").filter(Boolean);
   return (parts[0]?.[0] || "").concat(parts[1]?.[0] || "").toUpperCase();
@@ -90,6 +92,7 @@ function renderStars(rating = 0) {
   );
 }
 
+// Use for timestamps like created_at (NOT for DATE columns)
 function formatDate(d?: string | null) {
   if (!d) return "—";
   try {
@@ -158,6 +161,7 @@ async function adminCreateJob(input: {
   end_time?: string;   // HH:mm:SS or HH:mm
   notes?: string;
   client_id?: string;
+  cleaner_id: string;
   status?: JobStatus; // defaults to 'scheduled' in SQL if omitted
 }): Promise<string> {
   const payload: any = { ...input };
@@ -195,7 +199,7 @@ function CleanerListItem({
     >
       <div className="flex items-center gap-3">
         <Avatar className="w-10 h-10">
-          <AvatarImage src={cleaner.avatar_url ?? undefined} alt={cleaner.name} />
+          <AvatarImage src={cleaner.avatar_url ?? undefined} alt={cleaner.name || "Cleaner"} />
           <AvatarFallback>{initials(cleaner.name)}</AvatarFallback>
         </Avatar>
         <div className="flex-1 min-w-0">
@@ -227,7 +231,8 @@ function CleanerDetails({
     clientId: "",
   });
 
-  const todayIso = new Date().toISOString().slice(0, 10);
+  // ✅ local "today" (matches DATE column)
+  const todayIso = ymdLocalFromDate(new Date());
   const todayJobs = useMemo(() => jobs.filter((j) => j.date === todayIso), [jobs, todayIso]);
   const availability = getAvailability(todayJobs);
 
@@ -245,16 +250,16 @@ function CleanerDetails({
         toast.error("Date and address are required.");
         return;
       }
-      const newJobId = await adminCreateJob({
+      await adminCreateJob({
         address: form.address,
         date: form.date,
         start_time: form.start || undefined,
         end_time: form.end || undefined,
         notes: form.notes || undefined,
         client_id: form.clientId || undefined,
+        cleaner_id: cleaner.id,
         status: "scheduled",
       });
-      await adminAssignCleaner(newJobId, cleaner.id);
       toast.success("Job created and assigned.");
       setIsAssignDialogOpen(false);
       setForm({ notes: "", date: "", start: "", end: "", address: "", clientId: "" });
@@ -332,7 +337,7 @@ function CleanerDetails({
           <div className="flex flex-col sm:flex-row gap-6">
             <div className="flex-shrink-0">
               <Avatar className="w-24 h-24">
-                <AvatarImage src={cleaner.avatar_url ?? undefined} alt={cleaner.name} />
+                <AvatarImage src={cleaner.avatar_url ?? undefined} alt={cleaner.name || "Cleaner"} />
                 <AvatarFallback className="text-lg">{initials(cleaner.name)}</AvatarFallback>
               </Avatar>
             </div>
@@ -391,7 +396,8 @@ function CleanerDetails({
                   </div>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-600 mb-3">
-                    <div className="flex items-center gap-2"><CalendarIcon className="w-4 h-4" />{formatDate(job.date)}</div>
+                    {/* ✅ DATE uses local-safe formatter */}
+                    <div className="flex items-center gap-2"><CalendarIcon className="w-4 h-4" />{formatYMDLocal(job.date)}</div>
                     <div className="flex items-center gap-2"><ClockIcon className="w-4 h-4" />{job.start_time?.slice(0,5) || "—"}</div>
                     <div className="flex items-center gap-2"><MapPinIcon className="w-4 h-4" />{job.address || "—"}</div>
                   </div>
@@ -485,11 +491,11 @@ export default function CleanersPage() {
   const filteredCleaners = useMemo(() => {
     const q = filter.trim().toLowerCase();
     if (!q) return cleaners;
-    return cleaners.filter((c) => [c.name, c.email ?? "", c.phone ?? ""].some((f) => f.toLowerCase().includes(q)));
+    return cleaners.filter((c) => [c.name ?? "", c.email ?? "", c.phone ?? ""].some((f) => f.toLowerCase().includes(q)));
   }, [cleaners, filter]);
 
-  // compute availability per cleaner from today's jobs (cheap heuristic)
-  const today = new Date().toISOString().slice(0, 10);
+  // ✅ compute availability using local "today" (matches DATE column)
+  const today = ymdLocalFromDate(new Date());
   const availabilityById = useMemo(() => {
     const map = new Map<string, Availability>();
     if (selectedId) {

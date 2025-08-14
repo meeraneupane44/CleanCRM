@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { supabase } from "@/lib/supabase";
 import { Calendar } from "@/components/ui/calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,7 +20,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   CalendarIcon,
   ClockIcon,
@@ -28,111 +29,240 @@ import {
   FilterIcon,
   PlusIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
-interface Job {
+// ✅ shared date helpers (local timezone safe)
+import {
+  ymdLocalFromDate,
+  startOfWeekLocal,
+  endOfWeekLocal,
+  formatYMDLocal,
+} from "@/lib/dates";
+
+// -------------------- Types --------------------
+export type JobStatus = "scheduled" | "in_progress" | "completed" | "cancelled";
+
+interface CleanerRow {
   id: string;
-  title: string;
-  date: string;
-  time: string;
+  name: string | null;
+}
+
+interface DbJob {
+  id: string;
+  date: string; // YYYY-MM-DD
+  start_time: string | null; // HH:MM:SS
+  end_time: string | null; // HH:MM:SS
+  address: string | null;
+  status: JobStatus;
+  notes: string | null;
+  cleaner_id: string | null;
+  client_id: string | null;
+  cleaner?: { id: string; name: string | null } | null; // flattened
+  client?: { id: string; name: string | null } | null; // flattened
+}
+
+// -------------------- Utils --------------------
+function hhmm(t?: string | null) {
+  return t ? t.slice(0, 5) : "—";
+}
+function titleCaseStatus(s: JobStatus) {
+  if (s === "in_progress") return "In Progress";
+  if (s === "completed") return "Completed";
+  if (s === "cancelled") return "Cancelled";
+  return "Scheduled";
+}
+function statusBadgeClass(s: JobStatus) {
+  switch (s) {
+    case "scheduled":
+      return "bg-blue-100 text-blue-800";
+    case "in_progress":
+      return "bg-yellow-100 text-yellow-800";
+    case "completed":
+      return "bg-green-100 text-green-800";
+    case "cancelled":
+      return "bg-red-100 text-red-800";
+    default:
+      return "bg-gray-100 text-gray-800";
+  }
+}
+
+// -------------------- Data --------------------
+async function fetchCleaners(): Promise<CleanerRow[]> {
+  const { data, error } = await supabase
+    .from("users")
+    .select("id, name, role")
+    .eq("role", "cleaner")
+    .order("name");
+  if (error) throw error;
+  return (data || []).map((r: any) => ({ id: r.id, name: r.name ?? null }));
+}
+
+async function fetchJobsRange(startISO: string, endISO: string): Promise<DbJob[]> {
+  const { data, error } = await supabase
+    .from("jobs")
+    .select(
+      `
+      id, date, start_time, end_time, address, status, notes, cleaner_id, client_id,
+      cleaner:users!jobs_cleaner_id_fkey ( id, name ),
+      client:users!jobs_client_id_fkey   ( id, name )
+    `
+    )
+    .gte("date", startISO)
+    .lte("date", endISO)
+    .order("date", { ascending: true })
+    .order("start_time", { ascending: true });
+  if (error) throw error;
+  // Flatten 1:1 joins (Supabase returns arrays for joins)
+  return (data ?? []).map((r: any) => ({
+    ...r,
+    cleaner: Array.isArray(r.cleaner) ? r.cleaner[0] ?? null : r.cleaner ?? null,
+    client: Array.isArray(r.client) ? r.client[0] ?? null : r.client ?? null,
+  })) as DbJob[];
+}
+
+async function createJobDirect(p: {
   address: string;
-  cleaner: string;
-  status: "Scheduled" | "In Progress" | "Completed";
-  client: string;
+  date: string; // YYYY-MM-DD
+  start_time?: string; // HH:MM or HH:MM:SS
+  end_time?: string; // HH:MM or HH:MM:SS
+  notes?: string;
+  client_id?: string;
+  cleaner_id?: string;
+  status?: JobStatus;
+}) {
+  const payload: any = { ...p };
+  if (payload.start_time && payload.start_time.length === 5)
+    payload.start_time += ":00";
+  if (payload.end_time && payload.end_time.length === 5)
+    payload.end_time += ":00";
+  const { data, error } = await supabase
+    .from("jobs")
+    .insert(payload)
+    .select("id")
+    .single();
+  if (error) throw error;
+  return data.id as string;
 }
 
-interface JobSchedulerProps {
-  jobs?: Job[];
-  cleaners?: string[];
-}
-
-const JobScheduler = ({
-  jobs = [
-    {
-      id: "1",
-      title: "House Cleaning",
-      date: "2024-01-15",
-      time: "09:00",
-      address: "123 Main St, City",
-      cleaner: "Sarah Johnson",
-      status: "Scheduled",
-      client: "John Doe",
-    },
-    {
-      id: "2",
-      title: "Office Cleaning",
-      date: "2024-01-15",
-      time: "14:00",
-      address: "456 Business Ave, City",
-      cleaner: "Mike Wilson",
-      status: "In Progress",
-      client: "ABC Corp",
-    },
-    {
-      id: "3",
-      title: "Apartment Deep Clean",
-      date: "2024-01-14",
-      time: "10:00",
-      address: "789 Oak St, City",
-      cleaner: "Emma Davis",
-      status: "Completed",
-      client: "Jane Smith",
-    },
-  ],
-  cleaners = ["Sarah Johnson", "Mike Wilson", "Emma Davis", "Tom Brown"],
-}: JobSchedulerProps) => {
-  const [selectedDate, setSelectedDate] = useState<Date | undefined>(
-    new Date(),
-  );
+// -------------------- Component --------------------
+const JobScheduler: React.FC = () => {
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [viewMode, setViewMode] = useState<"day" | "week">("day");
-  const [filterCleaner, setFilterCleaner] = useState<string>("");
-  const [filterStatus, setFilterStatus] = useState<string>("");
+  const [filterCleaner, setFilterCleaner] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<string>("all");
+  const [cleaners, setCleaners] = useState<CleanerRow[]>([]);
+  const [jobs, setJobs] = useState<DbJob[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  const range = useMemo(() => {
+    if (viewMode === "day") {
+      const d = ymdLocalFromDate(selectedDate);
+      return { start: d, end: d };
+    }
+    const s = startOfWeekLocal(selectedDate);
+    const e = endOfWeekLocal(selectedDate);
+    return { start: ymdLocalFromDate(s), end: ymdLocalFromDate(e) };
+  }, [selectedDate, viewMode]);
+
+  async function refresh() {
+    try {
+      setLoading(true);
+      const [c, j] = await Promise.all([
+        cleaners.length ? Promise.resolve(cleaners) : fetchCleaners(),
+        fetchJobsRange(range.start, range.end),
+      ]);
+      if (!cleaners.length) setCleaners(c);
+      setJobs(j);
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to load jobs");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [range.start, range.end]);
+
+  // realtime refetch on any jobs change
+  useEffect(() => {
+    const ch = supabase
+      .channel("jobs-scheduler")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "jobs" },
+        () => refresh()
+      )
+      .subscribe();
+    return () => {
+      supabase.removeChannel(ch);
+    };
+  }, []);
+
+  const filtered = useMemo(() => {
+    return jobs.filter((j) => {
+      const cleanerOk =
+        filterCleaner === "all" || j.cleaner_id === filterCleaner;
+      const statusOk =
+        filterStatus === "all" || j.status === (filterStatus as JobStatus);
+      return cleanerOk && statusOk;
+    });
+  }, [jobs, filterCleaner, filterStatus]);
+
+  // Create Job dialog state
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [newJob, setNewJob] = useState({
-    title: "",
-    date: "",
-    time: "",
+    notes: "",
+    date: ymdLocalFromDate(selectedDate),
+    start: "",
+    end: "",
     address: "",
-    cleaner: "",
-    client: "",
+    cleanerId: "",
+    clientId: "",
+    status: "scheduled" as JobStatus,
   });
 
-  const getStatusColor = (status: Job["status"]) => {
-    switch (status) {
-      case "Scheduled":
-        return "bg-blue-100 text-blue-800";
-      case "In Progress":
-        return "bg-yellow-100 text-yellow-800";
-      case "Completed":
-        return "bg-green-100 text-green-800";
-      default:
-        return "bg-gray-100 text-gray-800";
+  useEffect(() => {
+    // keep dialog date in sync when user changes calendar
+    setNewJob((n) => ({ ...n, date: ymdLocalFromDate(selectedDate) }));
+  }, [selectedDate]);
+
+  async function handleCreateJob() {
+    try {
+      if (!newJob.date || !newJob.address) {
+        toast.error("Date and address are required");
+        return;
+      }
+      await createJobDirect({
+        address: newJob.address,
+        date: newJob.date,
+        start_time: newJob.start || undefined,
+        end_time: newJob.end || undefined,
+        notes: newJob.notes || undefined,
+        client_id: newJob.clientId || undefined,
+        cleaner_id: newJob.cleanerId || undefined,
+        status: newJob.status,
+      });
+      toast.success("Job created");
+      setIsCreateDialogOpen(false);
+      setNewJob({
+        notes: "",
+        date: ymdLocalFromDate(selectedDate),
+        start: "",
+        end: "",
+        address: "",
+        cleanerId: "",
+        clientId: "",
+        status: "scheduled",
+      });
+      refresh();
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message || "Failed to create job");
     }
-  };
-
-  const filteredJobs = jobs.filter((job) => {
-    const matchesCleaner =
-      !filterCleaner ||
-      filterCleaner === "all-cleaners" ||
-      job.cleaner === filterCleaner;
-    const matchesStatus =
-      !filterStatus ||
-      filterStatus === "all-status" ||
-      job.status === filterStatus;
-    return matchesCleaner && matchesStatus;
-  });
-
-  const handleCreateJob = () => {
-    console.log("Creating job:", newJob);
-    setIsCreateDialogOpen(false);
-    setNewJob({
-      title: "",
-      date: "",
-      time: "",
-      address: "",
-      cleaner: "",
-      client: "",
-    });
-  };
+  }
 
   return (
     <div className="bg-white min-h-screen p-4">
@@ -140,14 +270,10 @@ const JobScheduler = ({
         {/* Header */}
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <h1 className="text-2xl font-bold text-gray-900">Job Scheduler</h1>
-          <Dialog
-            open={isCreateDialogOpen}
-            onOpenChange={setIsCreateDialogOpen}
-          >
+          <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
             <DialogTrigger asChild>
               <Button className="flex items-center gap-2">
-                <PlusIcon className="w-4 h-4" />
-                Create New Job
+                <PlusIcon className="w-4 h-4" /> Create New Job
               </Button>
             </DialogTrigger>
             <DialogContent className="sm:max-w-md">
@@ -156,14 +282,14 @@ const JobScheduler = ({
               </DialogHeader>
               <div className="space-y-4">
                 <div>
-                  <Label htmlFor="title">Job Title</Label>
+                  <Label htmlFor="notes">Job Notes/Title</Label>
                   <Input
-                    id="title"
-                    value={newJob.title}
+                    id="notes"
+                    value={newJob.notes}
                     onChange={(e) =>
-                      setNewJob({ ...newJob, title: e.target.value })
+                      setNewJob({ ...newJob, notes: e.target.value })
                     }
-                    placeholder="House Cleaning"
+                    placeholder="House cleaning / Deep clean"
                   />
                 </div>
                 <div className="grid grid-cols-2 gap-4">
@@ -179,15 +305,48 @@ const JobScheduler = ({
                     />
                   </div>
                   <div>
-                    <Label htmlFor="time">Time</Label>
+                    <Label htmlFor="start">Start</Label>
                     <Input
-                      id="time"
+                      id="start"
                       type="time"
-                      value={newJob.time}
+                      value={newJob.start}
                       onChange={(e) =>
-                        setNewJob({ ...newJob, time: e.target.value })
+                        setNewJob({ ...newJob, start: e.target.value })
                       }
                     />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="end">End</Label>
+                    <Input
+                      id="end"
+                      type="time"
+                      value={newJob.end}
+                      onChange={(e) =>
+                        setNewJob({ ...newJob, end: e.target.value })
+                      }
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="cleaner">Assign Cleaner</Label>
+                    <Select
+                      value={newJob.cleanerId}
+                      onValueChange={(value) =>
+                        setNewJob({ ...newJob, cleanerId: value })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select cleaner" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {cleaners.map((c) => (
+                          <SelectItem key={c.id} value={c.id}>
+                            {c.name || "Unnamed"}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
                 </div>
                 <div>
@@ -202,33 +361,32 @@ const JobScheduler = ({
                   />
                 </div>
                 <div>
-                  <Label htmlFor="client">Client</Label>
+                  <Label htmlFor="client">Client ID (optional)</Label>
                   <Input
                     id="client"
-                    value={newJob.client}
+                    value={newJob.clientId}
                     onChange={(e) =>
-                      setNewJob({ ...newJob, client: e.target.value })
+                      setNewJob({ ...newJob, clientId: e.target.value })
                     }
-                    placeholder="John Doe"
+                    placeholder="UUID of client"
                   />
                 </div>
                 <div>
-                  <Label htmlFor="cleaner">Assign Cleaner</Label>
+                  <Label htmlFor="status">Status</Label>
                   <Select
-                    value={newJob.cleaner}
-                    onValueChange={(value) =>
-                      setNewJob({ ...newJob, cleaner: value })
+                    value={newJob.status}
+                    onValueChange={(v) =>
+                      setNewJob({ ...newJob, status: v as JobStatus })
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select cleaner" />
+                      <SelectValue placeholder="Select status" />
                     </SelectTrigger>
                     <SelectContent>
-                      {cleaners.map((cleaner) => (
-                        <SelectItem key={cleaner} value={cleaner}>
-                          {cleaner}
-                        </SelectItem>
-                      ))}
+                      <SelectItem value="scheduled">Scheduled</SelectItem>
+                      <SelectItem value="in_progress">In Progress</SelectItem>
+                      <SelectItem value="completed">Completed</SelectItem>
+                      <SelectItem value="cancelled">Cancelled</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -242,10 +400,7 @@ const JobScheduler = ({
 
         {/* View Toggle and Filters */}
         <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
-          <Tabs
-            value={viewMode}
-            onValueChange={(value) => setViewMode(value as "day" | "week")}
-          >
+          <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as any)}>
             <TabsList>
               <TabsTrigger value="day">Day View</TabsTrigger>
               <TabsTrigger value="week">Week View</TabsTrigger>
@@ -255,14 +410,14 @@ const JobScheduler = ({
           <div className="flex flex-wrap gap-2 items-center">
             <FilterIcon className="w-4 h-4 text-gray-500" />
             <Select value={filterCleaner} onValueChange={setFilterCleaner}>
-              <SelectTrigger className="w-40">
+              <SelectTrigger className="w-48">
                 <SelectValue placeholder="Filter by cleaner" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all-cleaners">All Cleaners</SelectItem>
-                {cleaners.map((cleaner) => (
-                  <SelectItem key={cleaner} value={cleaner}>
-                    {cleaner}
+                <SelectItem value="all">All Cleaners</SelectItem>
+                {cleaners.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name || "Unnamed"}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -273,10 +428,11 @@ const JobScheduler = ({
                 <SelectValue placeholder="Filter by status" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="all-status">All Status</SelectItem>
-                <SelectItem value="Scheduled">Scheduled</SelectItem>
-                <SelectItem value="In Progress">In Progress</SelectItem>
-                <SelectItem value="Completed">Completed</SelectItem>
+                <SelectItem value="all">All Status</SelectItem>
+                <SelectItem value="scheduled">Scheduled</SelectItem>
+                <SelectItem value="in_progress">In Progress</SelectItem>
+                <SelectItem value="completed">Completed</SelectItem>
+                <SelectItem value="cancelled">Cancelled</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -288,15 +444,17 @@ const JobScheduler = ({
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  <CalendarIcon className="w-5 h-5" />
-                  Calendar
+                  <CalendarIcon className="w-5 h-5" /> Calendar
                 </CardTitle>
               </CardHeader>
               <CardContent>
                 <Calendar
                   mode="single"
                   selected={selectedDate}
-                  onSelect={setSelectedDate}
+                  // normalize to local midnight
+                  onSelect={(d) =>
+                    d && setSelectedDate(new Date(d.getFullYear(), d.getMonth(), d.getDate()))
+                  }
                   className="rounded-md border"
                 />
               </CardContent>
@@ -307,55 +465,58 @@ const JobScheduler = ({
           <div className="lg:col-span-2">
             <div className="space-y-4">
               <h2 className="text-lg font-semibold text-gray-900">
-                {viewMode === "day" ? "Today's Jobs" : "This Week's Jobs"}
+                {viewMode === "day"
+                  ? `Jobs on ${selectedDate.toLocaleDateString()}`
+                  : `Jobs for ${startOfWeekLocal(selectedDate).toLocaleDateString()} — ${endOfWeekLocal(selectedDate).toLocaleDateString()}`}
               </h2>
 
-              {filteredJobs.length === 0 ? (
+              {loading ? (
+                <Card>
+                  <CardContent className="p-8 text-center text-gray-500">
+                    Loading…
+                  </CardContent>
+                </Card>
+              ) : filtered.length === 0 ? (
                 <Card>
                   <CardContent className="p-8 text-center">
-                    <p className="text-gray-500">
-                      No jobs found matching your filters.
-                    </p>
+                    <p className="text-gray-500">No jobs found matching your filters.</p>
                   </CardContent>
                 </Card>
               ) : (
                 <div className="space-y-3">
-                  {filteredJobs.map((job) => (
-                    <Card
-                      key={job.id}
-                      className="hover:shadow-md transition-shadow"
-                    >
+                  {filtered.map((job) => (
+                    <Card key={job.id} className="hover:shadow-md transition-shadow">
                       <CardContent className="p-4">
                         <div className="flex justify-between items-start mb-3">
                           <div>
                             <h3 className="font-semibold text-gray-900">
-                              {job.title}
+                              {job.notes || job.address || "Cleaning Job"}
                             </h3>
                             <p className="text-sm text-gray-600">
-                              {job.client}
+                              {job.client?.name || "—"}
                             </p>
                           </div>
-                          <Badge className={getStatusColor(job.status)}>
-                            {job.status}
+                          <Badge className={statusBadgeClass(job.status)}>
+                            {titleCaseStatus(job.status)}
                           </Badge>
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-600">
                           <div className="flex items-center gap-2">
                             <CalendarIcon className="w-4 h-4" />
-                            {job.date}
+                            {formatYMDLocal(job.date)}
                           </div>
                           <div className="flex items-center gap-2">
                             <ClockIcon className="w-4 h-4" />
-                            {job.time}
+                            {hhmm(job.start_time)}
                           </div>
                           <div className="flex items-center gap-2">
                             <MapPinIcon className="w-4 h-4" />
-                            {job.address}
+                            {job.address || "—"}
                           </div>
                           <div className="flex items-center gap-2">
                             <UserIcon className="w-4 h-4" />
-                            {job.cleaner}
+                            {job.cleaner?.name || "—"}
                           </div>
                         </div>
                       </CardContent>
