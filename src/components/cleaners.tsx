@@ -24,19 +24,16 @@ import {
   SearchIcon,
   StarIcon,
   Mail,
+  ImageIcon,
 } from "lucide-react";
 
 // ✅ local date helpers (no UTC shift for DATE columns)
 import { ymdLocalFromDate, formatYMDLocal } from "@/lib/dates";
 
 /**
- * This page is aligned to your posted schema:
+ * Schema reference:
  * public.jobs(id, client_id, cleaner_id, status, date, start_time, end_time, address, notes, created_by, created_at, check_in_at, check_out_at)
  * public.users(id, email, name, phone, role, created_at, avatar_url)
- *
- * RPC expected (security definer):
- * - admin_create_job(p jsonb) -> uuid
- *   expects keys: { address, date, start_time?, end_time?, notes?, client_id?, cleaner_id, status? }
  */
 
 // -------------------- Types --------------------
@@ -56,7 +53,7 @@ interface JobRow {
   check_in_at?: string | null;
   check_out_at?: string | null;
   client?: { name?: string | null; email?: string | null } | null; // joined via FK
-  rating?: number | null; // optional placeholder if you add ratings later
+  rating?: number | null;
 }
 
 interface CleanerProfile {
@@ -122,6 +119,23 @@ function availabilityBadgeClass(a: Availability) {
   }
 }
 
+function statusBadgeClass(s: JobStatus) {
+  switch (s) {
+    case "scheduled": return "bg-blue-100 text-blue-800";
+    case "in_progress": return "bg-yellow-100 text-yellow-800";
+    case "completed": return "bg-green-100 text-green-800";
+    case "cancelled": return "bg-red-100 text-red-800";
+    default: return "bg-gray-100 text-gray-800";
+  }
+}
+
+function titleCaseStatus(s: JobStatus) {
+  if (s === "in_progress") return "In Progress";
+  if (s === "completed") return "Completed";
+  if (s === "cancelled") return "Cancelled";
+  return "Scheduled";
+}
+
 // -------------------- Data Access --------------------
 async function fetchCleaners(): Promise<CleanerProfile[]> {
   const { data, error } = await supabase
@@ -154,6 +168,7 @@ async function fetchJobsForCleaner(cleanerId: string): Promise<JobRow[]> {
   return (data || []) as JobRow[];
 }
 
+// Optional RPCs if you use them elsewhere
 async function adminCreateJob(input: {
   address: string;
   date: string; // YYYY-MM-DD
@@ -165,7 +180,6 @@ async function adminCreateJob(input: {
   status?: JobStatus; // defaults to 'scheduled' in SQL if omitted
 }): Promise<string> {
   const payload: any = { ...input };
-  // Normalize times to HH:MM:SS
   if (payload.start_time && payload.start_time.length === 5) payload.start_time += ":00";
   if (payload.end_time && payload.end_time.length === 5) payload.end_time += ":00";
   const { data, error } = await supabase.rpc("admin_create_job", { p: payload });
@@ -173,9 +187,47 @@ async function adminCreateJob(input: {
   return data as string;
 }
 
-async function adminAssignCleaner(jobId: string, cleanerId: string) {
-  const { error } = await supabase.rpc("admin_assign_cleaner", { job_id: jobId, cleaner_id: cleanerId });
-  if (error) throw error;
+// -------------------- Photos: Storage + table fallback --------------------
+async function fetchPhotosForJob(jobId: string): Promise<string[]> {
+  const urls: string[] = [];
+
+  // 1) Try Supabase Storage: bucket "job_photos", folder `${jobId}/...`
+  try {
+    const { data: files, error: listErr } = await supabase
+      .storage.from("job_photos")
+      .list(jobId, { limit: 100, offset: 0, sortBy: { column: "name", order: "asc" } });
+    if (!listErr && files && files.length) {
+      const signed = await Promise.all(
+        files.map((f) =>
+          supabase.storage.from("job_photos").createSignedUrl(`${jobId}/${f.name}`, 60 * 60)
+        )
+      );
+      signed.forEach((s) => {
+        if (s.data?.signedUrl) urls.push(s.data.signedUrl);
+      });
+      if (urls.length) return urls;
+    }
+  } catch {
+    // ignore; try table fallback
+  }
+
+  // 2) Try a table fallback: public.job_photos (columns: job_id, url)
+  try {
+    const { data: rows, error } = await supabase
+      .from("job_photos")
+      .select("url")
+      .eq("job_id", jobId)
+      .order("created_at", { ascending: true });
+    if (!error && rows) {
+      rows.forEach((r: any) => {
+        if (r.url) urls.push(r.url);
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return urls;
 }
 
 // -------------------- Components --------------------
@@ -257,7 +309,7 @@ function CleanerDetails({
         end_time: form.end || undefined,
         notes: form.notes || undefined,
         client_id: form.clientId || undefined,
-        cleaner_id: cleaner.id,
+        cleaner_id: cleaner.id!,
         status: "scheduled",
       });
       toast.success("Job created and assigned.");
@@ -269,6 +321,30 @@ function CleanerDetails({
       toast.error(e?.message || "Failed to assign job");
     }
   }
+
+  // -------------------- Job details dialog state --------------------
+  const [openJob, setOpenJob] = useState<JobRow | null>(null);
+  const [jobPhotos, setJobPhotos] = useState<string[]>([]);
+  const [photosLoading, setPhotosLoading] = useState(false);
+
+  useEffect(() => {
+    if (!openJob?.id) return;
+    let cancelled = false;
+    (async () => {
+      setPhotosLoading(true);
+      try {
+        const urls = await fetchPhotosForJob(openJob.id);
+        if (!cancelled) setJobPhotos(urls);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setPhotosLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [openJob?.id]);
 
   return (
     <div className="space-y-6">
@@ -381,39 +457,130 @@ function CleanerDetails({
           ) : (
             <div className="space-y-4">
               {jobs.map((job) => (
-                <div key={job.id} className="border rounded-lg p-4 hover:bg-gray-50 transition-colors">
+                <button
+                  key={job.id}
+                  onClick={() => setOpenJob(job)}
+                  className="w-full text-left border rounded-lg p-4 hover:bg-gray-50 transition-colors"
+                >
                   <div className="flex justify-between items-start mb-3">
                     <div>
-                      <h3 className="font-semibold text-gray-900">{job.notes || job.address || "Cleaning Job"}</h3>
+                      <h3 className="font-semibold text-gray-900">
+                        {job.notes || job.address || "Cleaning Job"}
+                      </h3>
                       <p className="text-sm text-gray-600">{job.client?.name || "—"}</p>
                     </div>
                     <div className="flex items-center gap-2">
                       {job.status === "completed" && <CheckCircleIcon className="w-5 h-5 text-green-500" />}
-                      <Badge variant={job.status === "completed" ? "default" : job.status === "cancelled" ? "destructive" : "secondary"}>
-                        {job.status}
+                      <Badge className={statusBadgeClass(job.status)}>
+                        {titleCaseStatus(job.status)}
                       </Badge>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-600 mb-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm text-gray-600">
                     {/* ✅ DATE uses local-safe formatter */}
                     <div className="flex items-center gap-2"><CalendarIcon className="w-4 h-4" />{formatYMDLocal(job.date)}</div>
                     <div className="flex items-center gap-2"><ClockIcon className="w-4 h-4" />{job.start_time?.slice(0,5) || "—"}</div>
                     <div className="flex items-center gap-2"><MapPinIcon className="w-4 h-4" />{job.address || "—"}</div>
                   </div>
-
-                  {typeof job.rating === "number" && (
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm text-gray-600">Rating:</span>
-                      {renderStars(job.rating || 0)}
-                    </div>
-                  )}
-                </div>
+                </button>
               ))}
             </div>
           )}
         </CardContent>
       </Card>
+
+      {/* Job Details Dialog */}
+      <Dialog open={!!openJob} onOpenChange={(v) => !v && setOpenJob(null)}>
+        <DialogContent className="max-w-2xl sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ImageIcon className="w-5 h-5" />
+              {openJob?.notes || openJob?.address || "Job Details"}
+            </DialogTitle>
+          </DialogHeader>
+
+          {openJob && (
+            <div className="space-y-5">
+              {/* Top details */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <Badge className={statusBadgeClass(openJob.status)}>{titleCaseStatus(openJob.status)}</Badge>
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <CalendarIcon className="w-4 h-4" />
+                    <span>{formatYMDLocal(openJob.date)}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <ClockIcon className="w-4 h-4" />
+                    <span>
+                      {openJob.start_time?.slice(0,5) || "—"}
+                      {openJob.end_time ? ` – ${openJob.end_time.slice(0,5)}` : ""}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <MapPinIcon className="w-4 h-4" />
+                    <span>{openJob.address || "—"}</span>
+                  </div>
+                  <div className="text-gray-700">
+                    <span className="font-medium">Client:</span>{" "}
+                    {openJob.client?.name || "—"}
+                  </div>
+                  {(openJob.check_in_at || openJob.check_out_at) && (
+                    <div className="text-gray-700">
+                      <span className="font-medium">Check-in/out:</span>{" "}
+                      {openJob.check_in_at ? new Date(openJob.check_in_at).toLocaleString() : "—"}{" "}
+                      {openJob.check_out_at ? ` / ${new Date(openJob.check_out_at).toLocaleString()}` : ""}
+                    </div>
+                  )}
+                  {openJob.notes && (
+                    <div className="text-gray-700">
+                      <span className="font-medium">Notes:</span>{" "}
+                      {openJob.notes}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Photos */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-sm font-medium text-gray-900">Photos</h3>
+                  {photosLoading && <span className="text-xs text-gray-500">Loading…</span>}
+                </div>
+
+                {photosLoading ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <div key={i} className="aspect-square bg-gray-100 animate-pulse rounded-md" />
+                    ))}
+                  </div>
+                ) : jobPhotos.length === 0 ? (
+                  <div className="text-sm text-gray-500">No photos uploaded for this job.</div>
+                ) : (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {jobPhotos.map((url, i) => (
+                      <a key={i} href={url} target="_blank" rel="noreferrer" className="block">
+                        <img
+                          src={url}
+                          alt={`Job photo ${i + 1}`}
+                          className="w-full h-36 sm:h-40 object-cover rounded-md border"
+                          loading="lazy"
+                        />
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => setOpenJob(null)}>Close</Button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -436,7 +603,7 @@ export default function CleanersPage() {
         const list = await fetchCleaners();
         if (!active) return;
         setCleaners(list);
-        if (list.length > 0) setSelectedId(list[0].id);
+        if (list.length > 0) setSelectedId(list[0].id!);
       } catch (e: any) {
         console.error(e);
         toast.error(e?.message || "Failed to load cleaners");
@@ -483,7 +650,8 @@ export default function CleanersPage() {
       .subscribe();
 
     return () => {
-      supabase.removeChannel(channel);
+      // don't return the Promise to React
+      void supabase.removeChannel(channel);
       active = false;
     };
   }, [selectedId]);
@@ -503,7 +671,7 @@ export default function CleanersPage() {
       map.set(selectedId, getAvailability(todayJobs));
     }
     cleaners.forEach((c) => {
-      if (!map.has(c.id)) map.set(c.id, "Off Duty");
+      if (!map.has(c.id!)) map.set(c.id!, "Off Duty");
     });
     return map;
   }, [selectedId, jobs, cleaners, today]);
@@ -538,11 +706,11 @@ export default function CleanersPage() {
                 <div className="space-y-2 max-h-[70vh] overflow-auto pr-1">
                   {filteredCleaners.map((c) => (
                     <CleanerListItem
-                      key={c.id}
+                      key={c.id!}
                       cleaner={c}
                       isActive={selectedId === c.id}
-                      availability={availabilityById.get(c.id) || "Off Duty"}
-                      onClick={() => setSelectedId(c.id)}
+                      availability={availabilityById.get(c.id!) || "Off Duty"}
+                      onClick={() => setSelectedId(c.id!)}
                     />
                   ))}
                 </div>
@@ -569,7 +737,7 @@ export default function CleanersPage() {
                   cleaner={cleaner}
                   jobs={jobs}
                   onAssigned={() => {
-                    fetchJobsForCleaner(cleaner.id).then(setJobs).catch(() => {});
+                    fetchJobsForCleaner(cleaner.id!).then(setJobs).catch(() => {});
                   }}
                 />
               );

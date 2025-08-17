@@ -1,13 +1,11 @@
-import React, { useState } from "react";
-import {useNavigate, useLocation, Link } from "react-router-dom";
+import React, { useState, useEffect } from "react";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import SignupForm from "@/components/SignupForm";
-
 import {
   CalendarIcon,
   HomeIcon,
@@ -26,13 +24,25 @@ interface SidebarProps {
 }
 
 const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
-  const [isMobileOpen, setIsMobileOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    const fetchUser = async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (data?.user) {
+        setUserEmail(data.user.email);
+      }
+    };
+    fetchUser();
+  }, []);
+
   const handleLogout = async () => {
     await supabase.auth.signOut();
     navigate("/login");
   };
+
   const navItems = [
     { icon: <HomeIcon size={20} />, label: "Dashboard", href: "/" },
     { icon: <CalendarIcon size={20} />, label: "Scheduler", href: "/scheduler" },
@@ -43,13 +53,12 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
 
   const SidebarContent = () => (
     <div className="flex h-full flex-col bg-background">
-      {/* Logo + Toggle */}
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="rounded-md bg-primary p-1">
             <span className="text-lg font-bold text-primary-foreground">DFW</span>
           </div>
-          <h2 className="text-lg font-semibold">20 Cleaners</h2>
+          <h2 className="text-lg font-semibold">Cleaners</h2>
         </div>
         <Button variant="ghost" size="icon" onClick={onToggle} className="lg:hidden">
           <MenuIcon size={20} />
@@ -58,7 +67,6 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
 
       <Separator />
 
-      {/* Nav */}
       <ScrollArea className="flex-1 px-3 py-4">
         <nav className="flex flex-col gap-1">
           {navItems.map((item, index) => {
@@ -84,7 +92,6 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
 
       <Separator />
 
-      {/* User Info + Logout */}
       <div className="p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -97,7 +104,9 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
             </Avatar>
             <div>
               <p className="text-sm font-medium">Admin User</p>
-              <p className="text-xs text-muted-foreground">admin@dfw20cleaners.com</p>
+              <p className="text-xs text-muted-foreground">
+                {userEmail || "Loading..."}
+              </p>
             </div>
           </div>
           <Button variant="ghost" size="icon" onClick={handleLogout}>
@@ -109,7 +118,7 @@ const Sidebar = ({ className, isOpen = false, onToggle }: SidebarProps) => {
   );
 
   const MobileSidebar = () => (
-    <Sheet open={isMobileOpen} onOpenChange={setIsMobileOpen}>
+    <Sheet open={isOpen} onOpenChange={onToggle}>
       <SheetTrigger asChild>
         <Button variant="ghost" size="icon" className="lg:hidden">
           <MenuIcon size={24} />

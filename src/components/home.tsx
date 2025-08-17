@@ -23,12 +23,11 @@ const HomePage = () => {
 
   return (
     <div className="min-h-screen bg-gray-50">
-     
       <div className="flex">
         {/* <Sidebar /> */}
 
         {/* Main Content */}
-        <main className="flex-1 px-4 py-6 md:px-6 max-w-[800px] mx-auto w-full">
+        <main className="flex-1 px-4 py-6 md:px-6 max-w-5xl mx-auto w-full">
           <div className="space-y-6">
             <div>
               <h2 className="text-2xl font-bold mb-2">Dashboard</h2>
@@ -41,8 +40,10 @@ const HomePage = () => {
             {/* Quick Actions */}
             <QuickActions />
 
-            {/* Notification Center */}
-            <NotificationCenter />
+            {/* Notification Center (taller to show ~3 items) */}
+            <div className="min-h-[20rem]">
+              <NotificationCenter />
+            </div>
           </div>
         </main>
       </div>
@@ -82,7 +83,9 @@ const SidebarContent = () => {
             <a
               key={index}
               href="#"
-              className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm ${item.active ? "bg-blue-50 text-blue-600" : "text-gray-700 hover:bg-gray-100"}`}
+              className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm ${
+                item.active ? "bg-blue-50 text-blue-600" : "text-gray-700 hover:bg-gray-100"
+              }`}
             >
               {item.icon}
               {item.label}

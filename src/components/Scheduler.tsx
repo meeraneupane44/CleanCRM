@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import JobTasks from "@/components/JobTasks";
 import {
   Select,
   SelectContent,
@@ -518,6 +519,11 @@ const JobScheduler: React.FC = () => {
                             <UserIcon className="w-4 h-4" />
                             {job.cleaner?.name || "—"}
                           </div>
+                        </div>
+
+                        {/* 🔽 Your JobTasks component — rendered for this job */}
+                        <div className="mt-4">
+                          <JobTasks jobId={job.id} />
                         </div>
                       </CardContent>
                     </Card>
